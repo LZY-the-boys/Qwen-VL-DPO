@@ -7,7 +7,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Dict, List, Optional
-
+from transformers import DataCollatorForLanguageModeling, PreTrainedModel, PreTrainedTokenizerBase, TrainerCallback
+from typing import Any, Dict, List, Optional, Tuple, Union
 import datasets
 import numpy as np
 import torch.distributed
@@ -237,140 +238,137 @@ def make_conv(prompt, answer):
         },
     ]
 
+def tokenize_batch_element(
+    self,
+    feature,
+    model = None
+    # prompt: str,
+    # chosen: str,
+    # rejected: str,
+) -> Dict:
+    """Tokenize a single batch element.
 
-@dataclass
-class QwenDPODataCollator(DPODataCollatorWithPadding):
-    def tokenize_batch_element(
-        self,
-        prompt: str,
-        chosen: str,
-        rejected: str,
-    ) -> Dict:
-        """Tokenize a single batch element.
+    At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
+        in case the prompt + chosen or prompt + rejected responses is/are too long. First
+        we truncate the prompt; if we're still too long, we truncate the chosen/rejected.
 
-        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
-            in case the prompt + chosen or prompt + rejected responses is/are too long. First
-            we truncate the prompt; if we're still too long, we truncate the chosen/rejected.
+    We also create the labels for the chosen/rejected responses, which are of length equal to
+        the sum of the length of the prompt and the chosen/rejected response, with
+        label_pad_token_id  for the prompt tokens.
+    """
+    batch = {}
+    prompt = feature["prompt"]
+    chosen = feature["chosen"]
+    rejected = feature["rejected"]
 
-        We also create the labels for the chosen/rejected responses, which are of length equal to
-            the sum of the length of the prompt and the chosen/rejected response, with
-            label_pad_token_id  for the prompt tokens.
-        """
-        batch = {}
+    # format for preprocessing
+    chosen_conv = make_conv(prompt, chosen)
+    rejected_conv = make_conv(prompt, rejected)
 
-        # format for preprocessing
-        chosen_conv = make_conv(prompt, chosen)
-        rejected_conv = make_conv(prompt, rejected)
+    # preprocess using Qwen-VL's own method
+    # note that labels are already set here
+    prompt_tokens, chosen_tokens = preprocess(
+        [chosen_conv], self.tokenizer, self.max_length
+    )
+    _, rejected_tokens = preprocess(
+        [rejected_conv], self.tokenizer, self.max_length
+    )
+    prompt_tokens = {k: v[0] for k, v in prompt_tokens.items()}
+    chosen_tokens = {k: v[0] for k, v in chosen_tokens.items()}
+    rejected_tokens = {k: v[0] for k, v in rejected_tokens.items()}
 
-        # preprocess using Qwen-VL's own method
-        # note that labels are already set here
-        prompt_tokens, chosen_tokens = preprocess(
-            [chosen_conv], self.tokenizer, self.max_length
-        )
-        _, rejected_tokens = preprocess(
-            [rejected_conv], self.tokenizer, self.max_length
-        )
-        prompt_tokens = {k: v[0] for k, v in prompt_tokens.items()}
-        chosen_tokens = {k: v[0] for k, v in chosen_tokens.items()}
-        rejected_tokens = {k: v[0] for k, v in rejected_tokens.items()}
+    eos_token_id = self.tokenizer.eos_token_id
+    # Get indices in list prompt_tokens["input_ids"] that equals the EOS token (often 0)
+    eos_indices_prompt = [
+        i for i, x in enumerate(prompt_tokens["input_ids"]) if x == eos_token_id
+    ]
+    # attention mask these indices to eos_token_id
+    new_attention_mask = [
+        0 if i in eos_indices_prompt else p
+        for i, p in enumerate(prompt_tokens["attention_mask"])
+    ]
+    prompt_tokens["attention_mask"] = new_attention_mask
 
-        eos_token_id = self.tokenizer.eos_token_id
-        # Get indices in list prompt_tokens["input_ids"] that equals the EOS token (often 0)
-        eos_indices_prompt = [
-            i for i, x in enumerate(prompt_tokens["input_ids"]) if x == eos_token_id
-        ]
-        # attention mask these indices to eos_token_id
-        new_attention_mask = [
-            0 if i in eos_indices_prompt else p
-            for i, p in enumerate(prompt_tokens["attention_mask"])
-        ]
-        prompt_tokens["attention_mask"] = new_attention_mask
+    # do the same for chosen and rejected
+    eos_indices_chosen = [
+        i for i, x in enumerate(chosen_tokens["input_ids"]) if x == eos_token_id
+    ]
+    new_attention_mask_c = [
+        0 if i in eos_indices_chosen else p
+        for i, p in enumerate(chosen_tokens["attention_mask"])
+    ]
+    chosen_tokens["attention_mask"] = new_attention_mask_c
 
-        # do the same for chosen and rejected
-        eos_indices_chosen = [
-            i for i, x in enumerate(chosen_tokens["input_ids"]) if x == eos_token_id
-        ]
-        new_attention_mask_c = [
-            0 if i in eos_indices_chosen else p
-            for i, p in enumerate(chosen_tokens["attention_mask"])
-        ]
-        chosen_tokens["attention_mask"] = new_attention_mask_c
+    eos_indices_rejected = [
+        i for i, x in enumerate(rejected_tokens["input_ids"]) if x == eos_token_id
+    ]
+    new_attention_mask_r = [
+        0 if i in eos_indices_rejected else p
+        for i, p in enumerate(rejected_tokens["attention_mask"])
+    ]
+    rejected_tokens["attention_mask"] = new_attention_mask_r
 
-        eos_indices_rejected = [
-            i for i, x in enumerate(rejected_tokens["input_ids"]) if x == eos_token_id
-        ]
-        new_attention_mask_r = [
-            0 if i in eos_indices_rejected else p
-            for i, p in enumerate(rejected_tokens["attention_mask"])
-        ]
-        rejected_tokens["attention_mask"] = new_attention_mask_r
+    # add EOS token to end of prompt
+    chosen_tokens["input_ids"].append(self.tokenizer.eos_token_id)
+    chosen_tokens["labels"].append(self.tokenizer.eos_token_id)
+    chosen_tokens["attention_mask"].append(True)
 
-        # add EOS token to end of prompt
-        chosen_tokens["input_ids"].append(self.tokenizer.eos_token_id)
-        chosen_tokens["labels"].append(self.tokenizer.eos_token_id)
-        chosen_tokens["attention_mask"].append(1)
+    rejected_tokens["input_ids"].append(self.tokenizer.eos_token_id)
+    rejected_tokens["labels"].append(self.tokenizer.eos_token_id)
+    rejected_tokens["attention_mask"].append(True)
 
-        rejected_tokens["input_ids"].append(self.tokenizer.eos_token_id)
-        rejected_tokens["labels"].append(self.tokenizer.eos_token_id)
-        rejected_tokens["attention_mask"].append(1)
+    longer_response_length = max(
+        len(chosen_tokens["input_ids"]), len(rejected_tokens["input_ids"])
+    )
 
-        longer_response_length = max(
-            len(chosen_tokens["input_ids"]), len(rejected_tokens["input_ids"])
-        )
-
-        # if combined sequence is too long, truncate the prompt
-        if len(prompt_tokens["input_ids"]) + longer_response_length > self.max_length:
+    # if combined sequence is too long, truncate the prompt
+    for answer_tokens in [chosen_tokens, rejected_tokens, prompt_tokens]:
+        if len(answer_tokens["input_ids"]) + longer_response_length > self.max_length:
             if self.truncation_mode == "keep_start":
-                prompt_tokens = {
-                    k: v[: self.max_prompt_length] for k, v in prompt_tokens.items()
-                }
+                for k in ["input_ids", "attention_mask"]:
+                    answer_tokens[k] = answer_tokens[k][: self.max_prompt_length]
             elif self.truncation_mode == "keep_end":
-                prompt_tokens = {
-                    k: v[-self.max_prompt_length :] for k, v in prompt_tokens.items()
-                }
+                for k in ["input_ids", "attention_mask"]:
+                    answer_tokens[k] = answer_tokens[k][-self.max_prompt_length :]
             else:
                 raise ValueError(f"Unknown truncation mode: {self.truncation_mode}")
 
-        # if that's still too long, truncate the response
-        if len(prompt_tokens["input_ids"]) + longer_response_length > self.max_length:
-            chosen_tokens = {
-                k: v[: self.max_length - self.max_prompt_length]
-                for k, v in chosen_tokens.items()
-            }
-            rejected_tokens = {
-                k: v[: self.max_length - self.max_prompt_length]
-                for k, v in rejected_tokens.items()
-            }
+    # if that's still too long, truncate the response
+    for answer_tokens in [chosen_tokens, rejected_tokens]:
+        if len(answer_tokens["input_ids"]) + longer_response_length > self.max_length:
+            for k in ["input_ids", "attention_mask"]:
+                answer_tokens[k] = answer_tokens[k][: self.max_length - self.max_prompt_length]
 
-        # Create labels
-        chosen_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
-        rejected_tokens = {
-            k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens
-        }
-        chosen_tokens["labels"][: len(prompt_tokens["input_ids"])] = [
-            self.label_pad_token_id
-        ] * len(prompt_tokens["input_ids"])
-        rejected_tokens["labels"][: len(prompt_tokens["input_ids"])] = [
-            self.label_pad_token_id
-        ] * len(prompt_tokens["input_ids"])
+    # Create labels
+    chosen_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in ["input_ids", "attention_mask"]}
+    rejected_tokens = {
+        k: prompt_tokens[k] + rejected_tokens[k] for k in ["input_ids", "attention_mask"]
+    }
+    chosen_tokens["labels"] = chosen_tokens["input_ids"][:]
+    chosen_tokens["labels"][: len(prompt_tokens["input_ids"])] = [
+        self.label_pad_token_id
+    ] * len(prompt_tokens["input_ids"])
+    rejected_tokens["labels"] = rejected_tokens["input_ids"][:]
+    rejected_tokens["labels"][: len(prompt_tokens["input_ids"])] = [
+        self.label_pad_token_id
+    ] * len(prompt_tokens["input_ids"])
 
-        for k, toks in {
-            "chosen": chosen_tokens,
-            "rejected": rejected_tokens,
-            "prompt": prompt_tokens,
-        }.items():
-            for type_key, tokens in toks.items():
-                if type_key == "token_type_ids":
-                    continue
-                batch[f"{k}_{type_key}"] = tokens
+    for k, toks in {
+        "chosen_": chosen_tokens,
+        "rejected_": rejected_tokens,
+        "": prompt_tokens,
+    }.items():
+        for type_key, tokens in toks.items():
+            if type_key == "token_type_ids":
+                continue
+            batch[f"{k}{type_key}"] = tokens
 
-        batch["prompt"] = prompt
-        batch["chosen"] = prompt + chosen
-        batch["rejected"] = prompt + rejected
-        batch["chosen_response_only"] = chosen
-        batch["rejected_response_only"] = rejected
-
-        return batch
+    # batch["prompt"] = prompt
+    # batch["chosen"] = prompt + chosen
+    # batch["rejected"] = prompt + rejected
+    # batch["chosen_response_only"] = chosen
+    # batch["rejected_response_only"] = rejected
+    return batch
 
 
 def make_vlfeedback_paired_dataset(local_rank):
@@ -387,7 +385,7 @@ def make_vlfeedback_paired_dataset(local_rank):
         sample["prompt"] = qwen_vl_prompt_format(prompt, [img_path])
         return sample
 
-    ds = ds.map(set_format)
+    ds = ds.map(set_format,num_proc=os.cpu_count()//2)
 
     if local_rank == 0:
         print("Loading results from main process")
@@ -443,6 +441,7 @@ def make_vlfeedback_paired_dataset(local_rank):
         make_batch_pairs,
         batched=True,
         remove_columns=set(ds.column_names) - set(["prompt", "chosen", "rejected"]),
+        num_proc=os.cpu_count()//2
     )
 
     if local_rank == 0:
@@ -469,6 +468,7 @@ def train():
     ):
         training_args.distributed_state.distributed_type = DistributedType.DEEPSPEED
 
+    training_args.ddp_find_unused_parameters=False
     local_rank = training_args.local_rank
 
     device_map = None
@@ -549,25 +549,25 @@ def train():
     eval_dataset = dataset_split["test"]
 
     # Start trainner
+    setattr(DPOTrainer, 'tokenize_row', tokenize_batch_element)
     trainer = DPOTrainer(
         model,
         args=training_args,
         beta=training_args.beta,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=QwenDPODataCollator(
-            tokenizer,
-            max_length=training_args.model_max_length,
-            max_prompt_length=training_args.model_max_length // 2,
-            max_target_length=training_args.model_max_length // 2,
+        data_collator=DPODataCollatorWithPadding(
+            pad_token_id=tokenizer.pad_token_id,
             label_pad_token_id=IGNORE_TOKEN_ID,
-            padding_value=tokenizer.pad_token_id,
-            truncation_mode="keep_end",
         ),
         tokenizer=tokenizer,
-        max_length=training_args.model_max_length,
         peft_config=lora_config if training_args.use_lora else None,
         generate_during_eval=training_args.generate_during_eval,
+        max_length=training_args.model_max_length,
+        max_prompt_length=training_args.model_max_length // 2,
+        max_target_length=training_args.model_max_length // 2,
+        truncation_mode="keep_end",
+        padding_value=tokenizer.pad_token_id,
     )
 
     trainer.train()
@@ -579,4 +579,13 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    try:
+        train()     
+    except:
+        import sys,pdb,bdb
+        type, value, tb = sys.exc_info()
+        if type == bdb.BdbQuit:
+            exit()
+        print(type,value)
+        pdb.post_mortem(tb)
+

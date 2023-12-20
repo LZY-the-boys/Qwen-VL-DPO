@@ -88,9 +88,9 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.working, exist_ok=True)
-    if os.listdir(args.working):
-        print("ERROR: Working directory is not empty.", file=sys.stderr)
-        sys.exit(-1)
+    # if os.listdir(args.working):
+    #     print("ERROR: Working directory is not empty.", file=sys.stderr)
+    #     sys.exit(-1)
 
     folder = args.working + "/submitit"
     if args.gpus is None:  # Local
@@ -100,6 +100,12 @@ def main():
         assert args.gpus % GPUS_PER_NODE == 0
         nodes = args.gpus // GPUS_PER_NODE
         executor = submitit.AutoExecutor(folder=folder)
+    
+    with open(args.config, encoding="utf-8") as f:
+        config = yaml.safe_load(f.read())
+    
+    config["output_dir"] = args.working
+    print(dict2args(config))
 
     executor.update_parameters(
         name="dpo",
@@ -111,11 +117,6 @@ def main():
         slurm_mem_per_gpu="100GB",
         timeout_min=60 * 24 * 365,  # One year
     )
-
-    with open(args.config, encoding="utf-8") as f:
-        config = yaml.safe_load(f.read())
-
-    config["output_dir"] = args.working
     job = executor.submit(lambda: dpo_task(nodes, config))
     print(f"Launched job {job.job_id}")
     if args.gpus is None:  # Local
