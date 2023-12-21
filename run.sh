@@ -4,7 +4,7 @@ source activate lla
 # accelerate launch --main_process_port $(shuf -i25000-30000 -n1) \
 
 WANDB_MODE=disabled \
-deepspeed --master_port $(shuf -i25000-30000 -n1)  --include localhost:2 \
+deepspeed --master_port $(shuf -i25000-30000 -n1)  --include localhost:0,1,2,3 \
 run_dpo.py \
 --model_name_or_path Qwen/Qwen-VL-Chat \
 --output_dir /data/outs/qwen-dpo \
@@ -18,7 +18,7 @@ run_dpo.py \
 --eval_steps 500 \
 --save_strategy steps \
 --save_steps 100 \
---save_total_limit 10 \
+--save_total_limit 100 \
 --learning_rate 1e-5 \
 --weight_decay 0.05 \
 --adam_beta2 0.98 \
@@ -33,4 +33,4 @@ run_dpo.py \
 --tf32 True \
 --logging_first_step True \
 --remove_unused_columns False \
---output_dir $DATA_ROOT/outs/qwen-vl-dpo
+--output_dir $OUT_ROOT/qwen-vl-dpo

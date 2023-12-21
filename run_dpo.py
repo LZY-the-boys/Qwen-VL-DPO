@@ -469,6 +469,7 @@ def train():
         training_args.distributed_state.distributed_type = DistributedType.DEEPSPEED
 
     training_args.ddp_find_unused_parameters=False
+    training_args.gradient_checkpointing_kwargs = {'use_reentrant': False}
     local_rank = training_args.local_rank
 
     device_map = None
@@ -570,7 +571,7 @@ def train():
         padding_value=tokenizer.pad_token_id,
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=True)
     trainer.save_state()
 
     safe_save_model_for_hf_trainer(
