@@ -557,10 +557,10 @@ def train():
         beta=training_args.beta,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=DPODataCollatorWithPadding(
-            pad_token_id=tokenizer.pad_token_id,
-            label_pad_token_id=IGNORE_TOKEN_ID,
-        ),
+        # data_collator=DPODataCollatorWithPadding(
+        #     pad_token_id=tokenizer.pad_token_id,
+        #     label_pad_token_id=IGNORE_TOKEN_ID,
+        # ),
         tokenizer=tokenizer,
         peft_config=lora_config if training_args.use_lora else None,
         generate_during_eval=training_args.generate_during_eval,

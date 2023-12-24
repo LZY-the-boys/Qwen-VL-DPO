@@ -4,7 +4,7 @@ source activate lla
 # accelerate launch --main_process_port $(shuf -i25000-30000 -n1) \
 
 WANDB_MODE=disabled \
-deepspeed --master_port $(shuf -i25000-30000 -n1)  --include localhost:0,1,2,3 \
+deepspeed --master_port $(shuf -i25000-30000 -n1)  --include localhost:1,2,3 \
 run_dpo.py \
 --model_name_or_path Qwen/Qwen-VL-Chat \
 --output_dir /data/outs/qwen-dpo \
